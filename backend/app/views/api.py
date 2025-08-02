@@ -1,0 +1,684 @@
+import os
+import logging
+from flask import Blueprint, request, jsonify, send_from_directory, current_app
+from flask_login import login_required, current_user
+from werkzeug.exceptions import RequestEntityTooLarge
+from app.utils.helpers import (
+    validate_image_file,
+    validate_image_content,
+    generate_unique_filename,
+    save_uploaded_image,
+    delete_uploaded_image,
+    get_image_info,
+    get_file_hash,
+    is_safe_path,
+    format_file_size,
+    FileUploadError
+)
+from app.controllers.collection_controller import CollectionController
+from app.utils.rate_limiter import (
+    api_read_rate_limit, 
+    api_write_rate_limit, 
+    api_delete_rate_limit, 
+    file_upload_rate_limit,
+    public_view_rate_limit
+)
+from app.utils.security import SecurityValidator, SecurityHeaders, check_file_safety
+from app.utils.logger import AuditLogger
+from app.models.audit_log import AuditAction, ResourceType
+
+# Создаем Blueprint для API
+api_bp = Blueprint('api', __name__, url_prefix='/api')
+
+# Логгер для загрузок
+upload_logger = logging.getLogger('uploads')
+
+# Применяем security headers ко всем API endpoints
+@api_bp.before_request
+def before_api_request():
+    """Применение security checks перед каждым API запросом"""
+    # Проверяем Content-Type для POST/PUT запросов
+    if request.method in ['POST', 'PUT'] and request.endpoint != 'api.upload_file':
+        if not request.is_json and 'multipart/form-data' not in request.content_type:
+            return jsonify({'error': 'Content-Type must be application/json'}), 400
+    
+    # Проверяем размер запроса
+    if request.content_length and request.content_length > 50 * 1024 * 1024:  # 50MB лимит
+        return jsonify({'error': 'Request too large'}), 413
+
+@api_bp.after_request
+def after_api_request(response):
+    """Применение security headers к API ответам"""
+    response = SecurityHeaders.apply_security_headers(response)
+    
+    # Добавляем API-специфичные заголовки
+    response.headers['X-API-Version'] = '1.0'
+    response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+    response.headers['Pragma'] = 'no-cache'
+    response.headers['Expires'] = '0'
+    
+    return response
+
+
+@api_bp.route('/upload', methods=['POST'])
+@login_required
+@file_upload_rate_limit()
+def upload_file():
+    """
+    Загрузка изображения
+    POST /api/upload
+    
+    Ожидает multipart/form-data с полем 'file'
+    Возвращает информацию о загруженном файле
+    """
+    try:
+        # Проверяем наличие файла в запросе
+        if 'file' not in request.files:
+            AuditLogger.log_action(
+                action=AuditAction.ITEM_CREATE,
+                resource_type=ResourceType.SYSTEM,
+                details={'error': 'no_file_in_request', 'endpoint': 'upload'}
+            )
+            return jsonify({
+                'success': False,
+                'error': 'Файл не найден в запросе'
+            }), 400
+        
+        file = request.files['file']
+        
+        # Проверяем, что файл выбран
+        if file.filename == '':
+            return jsonify({
+                'success': False,
+                'error': 'Файл не выбран'
+            }), 400
+        
+        # Дополнительная валидация с помощью SecurityValidator
+        is_valid, error_message = SecurityValidator.validate_image_file(file)
+        if not is_valid:
+            AuditLogger.log_action(
+                action=AuditAction.ITEM_CREATE,
+                resource_type=ResourceType.SYSTEM,
+                details={'error': 'file_validation_failed', 'message': error_message}
+            )
+            return jsonify({
+                'success': False,
+                'error': error_message
+            }), 400
+        
+        # Основная валидация файла
+        validate_image_file(file)
+        validate_image_content(file)
+        
+        # Получаем информацию об изображении
+        image_info = get_image_info(file)
+        if not image_info:
+            return jsonify({
+                'success': False,
+                'error': 'Не удалось получить информацию об изображении'
+            }), 400
+        
+        # Генерируем безопасное уникальное имя файла
+        original_filename = SecurityValidator.sanitize_filename(file.filename)
+        unique_filename = SecurityValidator.generate_safe_filename(original_filename, current_user.id)
+        
+        # Вычисляем хеш файла для проверки дубликатов
+        file_hash = get_file_hash(file)
+        
+        # Сохраняем файл в разных размерах
+        saved_sizes = save_uploaded_image(file, unique_filename)
+        
+        # Проверяем безопасность сохраненного файла
+        upload_folder = current_app.config['UPLOAD_FOLDER']
+        original_path = os.path.join(upload_folder, 'original', unique_filename)
+        
+        is_safe, safety_message = check_file_safety(original_path)
+        if not is_safe:
+            # Удаляем небезопасный файл
+            delete_uploaded_image(unique_filename)
+            
+            AuditLogger.log_action(
+                action=AuditAction.ITEM_CREATE,
+                resource_type=ResourceType.SYSTEM,
+                details={'error': 'unsafe_file_detected', 'message': safety_message}
+            )
+            
+            return jsonify({
+                'success': False,
+                'error': 'Файл не прошел проверку безопасности'
+            }), 400
+        
+        # Логируем успешную загрузку
+        AuditLogger.log_action(
+            action=AuditAction.ITEM_CREATE,
+            resource_type=ResourceType.SYSTEM,
+            details={
+                'action': 'file_upload',
+                'filename': unique_filename,
+                'original_filename': original_filename,
+                'size_bytes': image_info['size_bytes'],
+                'file_hash': file_hash
+            }
+        )
+        
+        upload_logger.info(
+            f"File uploaded successfully: {unique_filename} by user {current_user.id} "
+            f"(original: {original_filename}, size: {format_file_size(image_info['size_bytes'])}, "
+            f"dimensions: {image_info['width']}x{image_info['height']})"
+        )
+        
+        # Формируем ответ
+        response_data = {
+            'success': True,
+            'file': {
+                'filename': unique_filename,
+                'original_filename': original_filename,
+                'file_hash': file_hash,
+                'size_bytes': image_info['size_bytes'],
+                'size_formatted': format_file_size(image_info['size_bytes']),
+                'width': image_info['width'],
+                'height': image_info['height'],
+                'format': image_info['format'],
+                'saved_sizes': saved_sizes,
+                'urls': {
+                    'original': f"/api/files/original/{unique_filename}",
+                    'medium': f"/api/files/medium/{unique_filename}",
+                    'thumbnail': f"/api/files/thumbnail/{unique_filename}"
+                }
+            }
+        }
+        
+        return jsonify(response_data), 201
+        
+    except FileUploadError as e:
+        upload_logger.warning(f"Upload validation failed: {str(e)} by user {current_user.id}")
+        AuditLogger.log_action(
+            action=AuditAction.ITEM_CREATE,
+            resource_type=ResourceType.SYSTEM,
+            details={'error': 'upload_validation_failed', 'message': str(e)}
+        )
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 400
+        
+    except RequestEntityTooLarge:
+        upload_logger.warning(f"File too large uploaded by user {current_user.id}")
+        AuditLogger.log_action(
+            action=AuditAction.ITEM_CREATE,
+            resource_type=ResourceType.SYSTEM,
+            details={'error': 'file_too_large'}
+        )
+        return jsonify({
+            'success': False,
+            'error': 'Файл слишком большой'
+        }), 413
+        
+    except Exception as e:
+        current_app.logger.error(f"Unexpected error during file upload: {str(e)}")
+        upload_logger.error(f"Upload error: {str(e)} by user {current_user.id}")
+        AuditLogger.log_action(
+            action=AuditAction.ITEM_CREATE,
+            resource_type=ResourceType.SYSTEM,
+            details={'error': 'system_error', 'message': str(e)}
+        )
+        return jsonify({
+            'success': False,
+            'error': 'Внутренняя ошибка сервера'
+        }), 500
+
+
+@api_bp.route('/files/<size>/<filename>')
+@public_view_rate_limit()
+def serve_file(size, filename):
+    """
+    Отдача файлов
+    GET /api/files/<size>/<filename>
+    
+    size: original, medium, thumbnail
+    filename: имя файла
+    """
+    try:
+        # Проверяем валидность размера
+        allowed_sizes = ['original', 'medium', 'thumbnail']
+        if size not in allowed_sizes:
+            return jsonify({
+                'success': False,
+                'error': 'Недопустимый размер изображения'
+            }), 400
+        
+        # Очищаем имя файла для безопасности
+        clean_filename = SecurityValidator.sanitize_filename(filename)
+        if clean_filename != filename:
+            current_app.logger.warning(f"Suspicious filename access attempt: {filename}")
+            return jsonify({
+                'success': False,
+                'error': 'Недопустимое имя файла'
+            }), 400
+        
+        # Формируем путь к файлу
+        upload_folder = current_app.config['UPLOAD_FOLDER']
+        file_directory = os.path.join(upload_folder, size)
+        file_path = os.path.join(file_directory, clean_filename)
+        
+        # Проверяем безопасность пути
+        if not is_safe_path(file_path):
+            current_app.logger.warning(f"Unsafe path access attempt: {file_path}")
+            AuditLogger.log_action(
+                action=AuditAction.ITEM_VIEW,
+                resource_type=ResourceType.SYSTEM,
+                details={'error': 'unsafe_path_access', 'path': file_path}
+            )
+            return jsonify({
+                'success': False,
+                'error': 'Недопустимый путь к файлу'
+            }), 400
+        
+        # Проверяем существование файла
+        if not os.path.exists(file_path):
+            AuditLogger.log_action(
+                action=AuditAction.ITEM_VIEW,
+                resource_type=ResourceType.SYSTEM,
+                details={'error': 'file_not_found', 'filename': clean_filename, 'size': size}
+            )
+            return jsonify({
+                'success': False,
+                'error': 'Файл не найден'
+            }), 404
+        
+        # Дополнительная проверка безопасности файла при каждом доступе
+        is_safe, _ = check_file_safety(file_path)
+        if not is_safe:
+            current_app.logger.error(f"Unsafe file access blocked: {file_path}")
+            return jsonify({
+                'success': False,
+                'error': 'Доступ к файлу запрещен'
+            }), 403
+        
+        # Отдаем файл с безопасными заголовками
+        response = send_from_directory(
+            file_directory,
+            clean_filename,
+            as_attachment=False,
+            cache_timeout=3600  # Кеш на 1 час
+        )
+        
+        # Добавляем security headers для изображений
+        response.headers['X-Content-Type-Options'] = 'nosniff'
+        response.headers['Content-Disposition'] = 'inline'
+        
+        return response
+        
+    except Exception as e:
+        current_app.logger.error(f"Error serving file {size}/{filename}: {str(e)}")
+        return jsonify({
+            'success': False,
+            'error': 'Ошибка при получении файла'
+        }), 500
+
+
+@api_bp.route('/files/<filename>', methods=['DELETE'])
+@login_required
+@api_delete_rate_limit()
+def delete_file(filename):
+    """
+    Удаление файла
+    DELETE /api/files/<filename>
+    
+    Удаляет файл во всех размерах
+    """
+    try:
+        # Очищаем имя файла
+        clean_filename = SecurityValidator.sanitize_filename(filename)
+        if clean_filename != filename:
+            return jsonify({
+                'success': False,
+                'error': 'Недопустимое имя файла'
+            }), 400
+        
+        # TODO: Добавить проверку, что файл принадлежит текущему пользователю
+        # Пока что разрешаем удаление только аутентифицированным пользователям
+        
+        # Логируем попытку удаления
+        AuditLogger.log_action(
+            action=AuditAction.ITEM_DELETE,
+            resource_type=ResourceType.SYSTEM,
+            details={'action': 'file_delete_attempt', 'filename': clean_filename}
+        )
+        
+        # Удаляем файл во всех размерах
+        deleted_files = delete_uploaded_image(clean_filename)
+        
+        if deleted_files:
+            upload_logger.info(f"File deleted: {clean_filename} by user {current_user.id}")
+            AuditLogger.log_action(
+                action=AuditAction.ITEM_DELETE,
+                resource_type=ResourceType.SYSTEM,
+                details={'action': 'file_deleted', 'filename': clean_filename, 'deleted_files': deleted_files}
+            )
+            
+            return jsonify({
+                'success': True,
+                'message': 'Файл успешно удален',
+                'deleted_files': deleted_files
+            }), 200
+        else:
+            return jsonify({
+                'success': False,
+                'error': 'Файл не найден или уже удален'
+            }), 404
+            
+    except Exception as e:
+        current_app.logger.error(f"Error deleting file {filename}: {str(e)}")
+        upload_logger.error(f"Delete error: {filename} by user {current_user.id} - {str(e)}")
+        AuditLogger.log_action(
+            action=AuditAction.ITEM_DELETE,
+            resource_type=ResourceType.SYSTEM,
+            details={'error': 'delete_failed', 'filename': filename, 'message': str(e)}
+        )
+        return jsonify({
+            'success': False,
+            'error': 'Ошибка при удалении файла'
+        }), 500
+
+
+@api_bp.route('/upload/info', methods=['GET'])
+@login_required
+@api_read_rate_limit()
+def upload_info():
+    """
+    Информация о параметрах загрузки
+    GET /api/upload/info
+    
+    Возвращает настройки загрузки для фронтенда
+    """
+    try:
+        return jsonify({
+            'success': True,
+            'upload_settings': {
+                'max_file_size': current_app.config.get('MAX_IMAGE_SIZE', SecurityValidator.MAX_IMAGE_SIZE),
+                'max_file_size_formatted': format_file_size(
+                    current_app.config.get('MAX_IMAGE_SIZE', SecurityValidator.MAX_IMAGE_SIZE)
+                ),
+                'allowed_extensions': list(SecurityValidator.ALLOWED_IMAGE_EXTENSIONS),
+                'allowed_mime_types': list(SecurityValidator.ALLOWED_IMAGE_MIMES),
+                'max_dimensions': SecurityValidator.MAX_IMAGE_DIMENSIONS,
+                'image_sizes': current_app.config.get('IMAGE_SIZES', {}),
+                'image_quality': current_app.config.get('IMAGE_QUALITY', 85)
+            }
+        }), 200
+        
+    except Exception as e:
+        current_app.logger.error(f"Error getting upload info: {str(e)}")
+        return jsonify({
+            'success': False,
+            'error': 'Ошибка при получении информации о загрузке'
+        }), 500
+
+
+@api_bp.route('/files/validate', methods=['POST'])
+@login_required
+@api_write_rate_limit()
+def validate_file():
+    """
+    Предварительная валидация файла без сохранения
+    POST /api/files/validate
+    
+    Проверяет файл на соответствие требованиям
+    """
+    try:
+        if 'file' not in request.files:
+            return jsonify({
+                'success': False,
+                'error': 'Файл не найден в запросе'
+            }), 400
+        
+        file = request.files['file']
+        
+        if file.filename == '':
+            return jsonify({
+                'success': False,
+                'error': 'Файл не выбран'
+            }), 400
+        
+        # Валидация с помощью SecurityValidator
+        is_valid, error_message = SecurityValidator.validate_image_file(file)
+        if not is_valid:
+            return jsonify({
+                'success': True,
+                'valid': False,
+                'error': error_message
+            }), 200
+        
+        # Дополнительная валидация
+        validate_image_file(file)
+        validate_image_content(file)
+        
+        # Получаем информацию об изображении
+        image_info = get_image_info(file)
+        
+        return jsonify({
+            'success': True,
+            'valid': True,
+            'file_info': {
+                'size_bytes': image_info['size_bytes'],
+                'size_formatted': format_file_size(image_info['size_bytes']),
+                'width': image_info['width'],
+                'height': image_info['height'],
+                'format': image_info['format'],
+                'filename': SecurityValidator.sanitize_filename(file.filename)
+            }
+        }), 200
+        
+    except FileUploadError as e:
+        return jsonify({
+            'success': True,
+            'valid': False,
+            'error': str(e)
+        }), 200
+        
+    except Exception as e:
+        current_app.logger.error(f"Error validating file: {str(e)}")
+        return jsonify({
+            'success': False,
+            'error': 'Ошибка при валидации файла'
+        }), 500
+
+
+# ========== API ДЛЯ КОЛЛЕКЦИЙ ==========
+
+@api_bp.route('/collections', methods=['POST'])
+def create_collection():
+    """Создание новой коллекции"""
+    return CollectionController.create_collection()
+
+
+@api_bp.route('/collections', methods=['GET'])
+def get_user_collections():
+    """Получение коллекций пользователя"""
+    return CollectionController.get_user_collections()
+
+
+@api_bp.route('/collections/public', methods=['GET'])
+def get_public_collections():
+    """Получение публичных коллекций"""
+    return CollectionController.get_public_collections()
+
+
+@api_bp.route('/collections/<int:collection_id>', methods=['GET'])
+def get_collection(collection_id):
+    """Получение конкретной коллекции"""
+    return CollectionController.get_collection_by_id(collection_id)
+
+
+@api_bp.route('/collections/<int:collection_id>', methods=['PUT'])
+def update_collection(collection_id):
+    """Обновление коллекции"""
+    return CollectionController.update_collection(collection_id)
+
+
+@api_bp.route('/collections/<int:collection_id>', methods=['DELETE'])
+def delete_collection(collection_id):
+    """Удаление коллекции"""
+    return CollectionController.delete_collection(collection_id)
+
+
+@api_bp.route('/collections/<int:collection_id>/share', methods=['POST'])
+def share_collection(collection_id):
+    """Создание публичной ссылки для коллекции"""
+    return CollectionController.share_collection(collection_id)
+
+
+# ========== API ДЛЯ ПРЕДМЕТОВ КОЛЛЕКЦИЙ ==========
+
+@api_bp.route('/collections/<int:collection_id>/items', methods=['POST'])
+def add_item_to_collection(collection_id):
+    """Добавление предмета в коллекцию"""
+    return CollectionController.add_item_to_collection(collection_id)
+
+
+@api_bp.route('/collections/<int:collection_id>/items', methods=['GET'])
+def get_collection_items(collection_id):
+    """Получение всех предметов коллекции"""
+    return CollectionController.get_collection_items(collection_id)
+
+
+@api_bp.route('/items/<int:item_id>', methods=['GET'])
+def get_item(item_id):
+    """Получение конкретного предмета"""
+    return CollectionController.get_item_by_id(item_id)
+
+
+@api_bp.route('/items/<int:item_id>', methods=['PUT'])
+def update_item(item_id):
+    """Обновление предмета"""
+    return CollectionController.update_item(item_id)
+
+
+@api_bp.route('/items/<int:item_id>', methods=['DELETE'])
+def delete_item(item_id):
+    """Удаление предмета"""
+    return CollectionController.delete_item(item_id)
+
+
+# ========== СЛУЖЕБНЫЕ API ==========
+
+@api_bp.route('/health', methods=['GET'])
+def health_check():
+    """Проверка состояния API"""
+    return jsonify({
+        'status': 'healthy',
+        'version': '1.0',
+        'timestamp': db.func.now()
+    }), 200
+
+
+@api_bp.route('/stats', methods=['GET'])
+@login_required
+@api_read_rate_limit()
+def get_user_stats():
+    """Получение статистики пользователя"""
+    try:
+        from app.models.collection import Collection
+        from app.models.item import Item
+        
+        # Подсчитываем статистику
+        collections_count = Collection.query.filter_by(user_id=current_user.id).count()
+        items_count = db.session.query(Item).join(Collection).filter(
+            Collection.user_id == current_user.id
+        ).count()
+        public_collections_count = Collection.query.filter_by(
+            user_id=current_user.id, 
+            is_public=True
+        ).count()
+        
+        return jsonify({
+            'success': True,
+            'stats': {
+                'collections_count': collections_count,
+                'items_count': items_count,
+                'public_collections_count': public_collections_count,
+                'private_collections_count': collections_count - public_collections_count
+            }
+        }), 200
+        
+    except Exception as e:
+        current_app.logger.error(f"Error getting user stats: {str(e)}")
+        return jsonify({
+            'success': False,
+            'error': 'Ошибка при получении статистики'
+        }), 500
+
+
+# ========== ОБРАБОТЧИКИ ОШИБОК ==========
+
+# Обработчик ошибок для превышения размера файла
+@api_bp.errorhandler(RequestEntityTooLarge)
+def handle_file_too_large(error):
+    """Обработка ошибки превышения размера файла"""
+    max_size = current_app.config.get('MAX_CONTENT_LENGTH', 16 * 1024 * 1024)
+    AuditLogger.log_action(
+        action=AuditAction.ITEM_CREATE,
+        resource_type=ResourceType.SYSTEM,
+        details={'error': 'request_too_large', 'max_size': max_size}
+    )
+    return jsonify({
+        'success': False,
+        'error': f'Файл слишком большой. Максимальный размер: {format_file_size(max_size)}'
+    }), 413
+
+
+# Обработчик общих ошибок API
+@api_bp.errorhandler(500)
+def handle_internal_error(error):
+    """Обработка внутренних ошибок сервера"""
+    current_app.logger.error(f"Internal server error in API: {str(error)}")
+    AuditLogger.log_action(
+        action='ERROR',
+        resource_type=ResourceType.SYSTEM,
+        details={'error': 'internal_server_error', 'message': str(error)}
+    )
+    return jsonify({
+        'success': False,
+        'error': 'Внутренняя ошибка сервера'
+    }), 500
+
+
+# Обработчик ошибок валидации
+@api_bp.errorhandler(400)
+def handle_bad_request(error):
+    """Обработка ошибок валидации"""
+    return jsonify({
+        'success': False,
+        'error': 'Некорректный запрос'
+    }), 400
+
+
+# Обработчик ошибок аутентификации
+@api_bp.errorhandler(401)
+def handle_unauthorized(error):
+    """Обработка ошибок аутентификации"""
+    return jsonify({
+        'success': False,
+        'error': 'Требуется аутентификация'
+    }), 401
+
+
+# Обработчик ошибок доступа
+@api_bp.errorhandler(403)
+def handle_forbidden(error):
+    """Обработка ошибок доступа"""
+    return jsonify({
+        'success': False,
+        'error': 'Доступ запрещен'
+    }), 403
+
+
+# Обработчик ошибок "не найдено"
+@api_bp.errorhandler(404)
+def handle_not_found(error):
+    """Обработка ошибок "не найдено" """
+    return jsonify({
+        'success': False,
+        'error': 'Ресурс не найден'
+    }), 404
