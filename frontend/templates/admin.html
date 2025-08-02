@@ -1,0 +1,145 @@
+{% extends "base.html" %}
+
+{% block title %}Admin Panel - Collections{% endblock %}
+
+{% block head %}
+<link rel="stylesheet" href="{{ url_for('static', filename='css/admin.css') }}">
+{% endblock %}
+
+{% block content %}
+<div class="admin-container">
+    <!-- Header -->
+    <div class="admin-header">
+        <h1>Administrative Panel</h1>
+        <div class="admin-nav">
+            <button class="nav-btn active" data-tab="dashboard">Dashboard</button>
+            <button class="nav-btn" data-tab="users">Users</button>
+            <button class="nav-btn" data-tab="collections">Collections</button>
+        </div>
+    </div>
+
+    <!-- Dashboard Tab -->
+    <div id="dashboard-tab" class="admin-tab active">
+        <div class="stats-grid">
+            <div class="stat-card">
+                <h3>Total Users</h3>
+                <div class="stat-number" id="total-users">-</div>
+                <div class="stat-detail">
+                    <span id="active-users">-</span> active, 
+                    <span id="blocked-users">-</span> blocked
+                </div>
+            </div>
+            
+            <div class="stat-card">
+                <h3>Total Collections</h3>
+                <div class="stat-number" id="total-collections">-</div>
+                <div class="stat-detail">
+                    <span id="active-collections">-</span> active, 
+                    <span id="blocked-collections">-</span> blocked
+                </div>
+            </div>
+            
+            <div class="stat-card">
+                <h3>New Users (Month)</h3>
+                <div class="stat-number" id="new-users-month">-</div>
+            </div>
+            
+            <div class="stat-card">
+                <h3>New Collections (Month)</h3>
+                <div class="stat-number" id="new-collections-month">-</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Users Tab -->
+    <div id="users-tab" class="admin-tab">
+        <div class="tab-header">
+            <h2>Users Management</h2>
+            <div class="search-controls">
+                <input type="text" id="users-search" placeholder="Search users...">
+                <button id="users-search-btn">Search</button>
+            </div>
+        </div>
+        
+        <div class="table-container">
+            <table class="admin-table" id="users-table">
+                <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>Name</th>
+                        <th>Email</th>
+                        <th>Collections</th>
+                        <th>Created</th>
+                        <th>Status</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="users-tbody">
+                    <!-- Users will be loaded here -->
+                </tbody>
+            </table>
+        </div>
+        
+        <div class="pagination" id="users-pagination">
+            <!-- Pagination will be loaded here -->
+        </div>
+    </div>
+
+    <!-- Collections Tab -->
+    <div id="collections-tab" class="admin-tab">
+        <div class="tab-header">
+            <h2>Collections Management</h2>
+            <div class="search-controls">
+                <input type="text" id="collections-search" placeholder="Search collections...">
+                <button id="collections-search-btn">Search</button>
+            </div>
+        </div>
+        
+        <div class="table-container">
+            <table class="admin-table" id="collections-table">
+                <thead>
+                    <tr>
+                        <th>ID</th>
+                        <th>Name</th>
+                        <th>Owner</th>
+                        <th>Items</th>
+                        <th>Public</th>
+                        <th>Created</th>
+                        <th>Status</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="collections-tbody">
+                    <!-- Collections will be loaded here -->
+                </tbody>
+            </table>
+        </div>
+        
+        <div class="pagination" id="collections-pagination">
+            <!-- Pagination will be loaded here -->
+        </div>
+    </div>
+
+    <!-- Loading indicator -->
+    <div id="loading" class="loading hidden">
+        <div class="spinner"></div>
+        <p>Loading...</p>
+    </div>
+
+    <!-- Confirmation Modal -->
+    <div id="confirm-modal" class="modal hidden">
+        <div class="modal-content">
+            <h3 id="confirm-title">Confirm Action</h3>
+            <p id="confirm-message">Are you sure you want to perform this action?</p>
+            <div class="modal-buttons">
+                <button id="confirm-cancel" class="btn-secondary">Cancel</button>
+                <button id="confirm-ok" class="btn-primary">Confirm</button>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}
+
+{% block scripts %}
+<script src="{{ url_for('static', filename='js/admin.js') }}"></script>
+{% endblock %}
