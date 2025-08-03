@@ -1,5 +1,6 @@
 from datetime import datetime
 from flask_login import UserMixin
+from werkzeug.security import generate_password_hash, check_password_hash
 from app import db
 import os
 from flask import current_app
@@ -8,15 +9,16 @@ class User(UserMixin, db.Model):
     __tablename__ = 'users'
     
     id = db.Column(db.Integer, primary_key=True)
-    google_id = db.Column(db.String(100), unique=True, nullable=True, index=True)
-    apple_id = db.Column(db.String(100), unique=True, nullable=True, index=True)
     name = db.Column(db.String(100), nullable=False)
     email = db.Column(db.String(120), unique=True, nullable=False, index=True)
+    password_hash = db.Column(db.String(255), nullable=False)
     avatar_url = db.Column(db.String(255), nullable=True)
     is_active = db.Column(db.Boolean, default=True, nullable=False)
     is_admin = db.Column(db.Boolean, default=False, nullable=False)
     is_blocked = db.Column(db.Boolean, default=False, nullable=False)
     blocked_at = db.Column(db.DateTime, nullable=True)
+    email_verified = db.Column(db.Boolean, default=False, nullable=False)
+    email_verification_token = db.Column(db.String(255), nullable=True)
     created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
     updated_at = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
     
@@ -25,6 +27,14 @@ class User(UserMixin, db.Model):
     
     def __repr__(self):
         return f'<User {self.name} ({self.email})>'
+    
+    def set_password(self, password):
+        """Set password hash"""
+        self.password_hash = generate_password_hash(password)
+    
+    def check_password(self, password):
+        """Check if provided password matches hash"""
+        return check_password_hash(self.password_hash, password)
     
     def to_dict(self):
         """Convert user object to dictionary for JSON serialization"""
@@ -35,6 +45,7 @@ class User(UserMixin, db.Model):
             'avatar_url': self.get_avatar_url(),
             'is_admin': self.is_admin,
             'is_blocked': self.is_blocked,
+            'email_verified': self.email_verified,
             'blocked_at': self.blocked_at.isoformat() if self.blocked_at else None,
             'collections_count': self.get_collections_count(),
             'created_at': self.created_at.isoformat() if self.created_at else None,
@@ -50,19 +61,16 @@ class User(UserMixin, db.Model):
         }
     
     @staticmethod
-    def find_by_google_id(google_id):
-        """Find user by Google ID"""
-        return User.query.filter_by(google_id=google_id).first()
-    
-    @staticmethod
-    def find_by_apple_id(apple_id):
-        """Find user by Apple ID"""
-        return User.query.filter_by(apple_id=apple_id).first()
-    
-    @staticmethod
     def find_by_email(email):
         """Find user by email"""
         return User.query.filter_by(email=email).first()
+    
+    @staticmethod
+    def create_user(name, email, password):
+        """Create new user with email and password"""
+        user = User(name=name, email=email)
+        user.set_password(password)
+        return user
     
     def get_public_collections(self):
         """Get all public collections for this user"""
@@ -71,6 +79,16 @@ class User(UserMixin, db.Model):
     def get_collections_count(self):
         """Get total number of collections for this user"""
         return len(self.collections)
+    
+    def verify_email(self):
+        """Mark email as verified"""
+        self.email_verified = True
+        self.email_verification_token = None
+        self.updated_at = datetime.utcnow()
+    
+    def is_email_verified(self):
+        """Check if email is verified"""
+        return self.email_verified
     
     # ========== МЕТОДЫ ДЛЯ РАБОТЫ С АВАТАРОМ ==========
     
@@ -87,7 +105,7 @@ class User(UserMixin, db.Model):
         if not self.avatar_url:
             return None
         
-        # Если аватар - внешняя ссылка (OAuth), возвращаем как есть
+        # Если аватар - внешняя ссылка, возвращаем как есть
         if self.avatar_url.startswith(('http://', 'https://')):
             return self.avatar_url
         
@@ -214,8 +232,14 @@ class User(UserMixin, db.Model):
             if 'name' in data and data['name'].strip():
                 self.name = data['name'].strip()
             
-            # Email обычно не обновляется через профиль
-            # так как он привязан к OAuth провайдеру
+            # Email можно обновлять, но нужно повторно верифицировать
+            if 'email' in data and data['email'].strip() and data['email'] != self.email:
+                self.email = data['email'].strip()
+                self.email_verified = False  # Требуем повторную верификацию
+            
+            # Обновление пароля
+            if 'password' in data and data['password']:
+                self.set_password(data['password'])
             
             self.updated_at = datetime.utcnow()
             db.session.commit()

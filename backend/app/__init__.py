@@ -3,12 +3,14 @@ from flask import Flask, jsonify, request
 from flask_sqlalchemy import SQLAlchemy
 from flask_login import LoginManager
 from flask_wtf.csrf import CSRFProtect
+from flask_mail import Mail
 from app.config.config import config
 
 # Инициализация расширений
 db = SQLAlchemy()
 login_manager = LoginManager()
 csrf = CSRFProtect()
+mail = Mail()
 
 def create_app(config_name=None):
     """Фабрика приложений Flask"""
@@ -28,6 +30,7 @@ def create_app(config_name=None):
     
     # Инициализация расширений
     db.init_app(app)
+    mail.init_app(app)
     
     # Настройка Flask-Login
     login_manager.init_app(app)
@@ -38,6 +41,11 @@ def create_app(config_name=None):
     # Настройка CSRF (отключаем для API endpoints)
     csrf.init_app(app)
     
+    # Отключаем CSRF для API маршрутов
+    @csrf.exempt
+    def exempt_api_routes():
+        return request.path.startswith('/api/')
+    
     @login_manager.user_loader
     def load_user(user_id):
         from app.models.user import User
@@ -47,13 +55,10 @@ def create_app(config_name=None):
     from app.views.auth import auth_bp
     from app.views.collections import collections_bp
     from app.views.api import api_bp
-    from app.views.admin import admin_bp, admin_api_bp
     
     app.register_blueprint(auth_bp, url_prefix='/auth')
     app.register_blueprint(collections_bp, url_prefix='/collections')
     app.register_blueprint(api_bp, url_prefix='/api')
-    app.register_blueprint(admin_bp)
-    app.register_blueprint(admin_api_bp)
     
     # Главная страница и основные маршруты
     @app.route('/')
@@ -61,7 +66,10 @@ def create_app(config_name=None):
         from flask import render_template
         from app.models.collection import Collection
         # Получаем последние публичные коллекции для главной страницы
-        recent_collections = Collection.query.filter_by(is_public=True, is_blocked=False).order_by(Collection.created_at.desc()).limit(6).all()
+        recent_collections = Collection.query.filter_by(
+            is_public=True, 
+            is_blocked=False
+        ).order_by(Collection.created_at.desc()).limit(6).all()
         return render_template('index.html', recent_collections=recent_collections)
     
     @app.route('/collection/<uuid>')
@@ -88,20 +96,6 @@ def create_app(config_name=None):
                              collection=collection,
                              items=collection.items,
                              custom_fields=collection.get_custom_fields())
-    
-    @app.route('/profile')
-    def profile():
-        """Профиль пользователя"""
-        from flask import render_template
-        from flask_login import login_required, current_user
-        
-        @login_required
-        def protected_profile():
-            return render_template('profile.html',
-                                 user=current_user,
-                                 collections=current_user.collections)
-        
-        return protected_profile()
     
     # Middleware для CORS
     @app.after_request
@@ -156,9 +150,9 @@ def create_app(config_name=None):
     @app.errorhandler(413)
     def file_too_large_error(error):
         if request.path.startswith('/api/'):
-            return jsonify({'error': 'Файл слишком большой. Максимальный размер: 16MB'}), 413
+            return jsonify({'error': 'Файл слишком большой. Максимальный размер: 10MB'}), 413
         from flask import flash, redirect, url_for
-        flash('Файл слишком большой. Максимальный размер: 16MB', 'error')
+        flash('Файл слишком большой. Максимальный размер: 10MB', 'error')
         return redirect(url_for('index'))
     
     @app.errorhandler(400)
@@ -175,26 +169,41 @@ def create_app(config_name=None):
         from flask import render_template
         return render_template('403.html'), 403
     
+    # Обработчик для неавторизованных пользователей
+    @login_manager.unauthorized_handler
+    def unauthorized():
+        if request.path.startswith('/api/'):
+            return jsonify({'error': 'Необходима авторизация'}), 401
+        from flask import flash, redirect, url_for
+        flash('Пожалуйста, войдите в систему для доступа к этой странице.', 'info')
+        return redirect(url_for('auth.login', next=request.url))
+    
     # Создание таблиц базы данных
     with app.app_context():
         # Импортируем модели для создания таблиц
         from app.models.user import User
         from app.models.collection import Collection
         from app.models.item import Item
-        from app.models.admin import Admin
         
         db.create_all()
         
-        # Создаем единственного админа если указан в переменных окружения
+        # Создаем администратора если указан в переменных окружения
         admin_email = os.environ.get('ADMIN_EMAIL')
-        if admin_email and not Admin.query.filter_by(email=admin_email).first():
-            admin_user = Admin(
-                name=os.environ.get('ADMIN_NAME', 'Administrator'),
-                email=admin_email
-            )
-            db.session.add(admin_user)
-            db.session.commit()
-            app.logger.info(f'Created admin user: {admin_email}')
+        admin_password = os.environ.get('ADMIN_PASSWORD')
+        
+        if admin_email and admin_password:
+            admin_user = User.query.filter_by(email=admin_email).first()
+            if not admin_user:
+                admin_user = User.create_user(
+                    name=os.environ.get('ADMIN_NAME', 'Administrator'),
+                    email=admin_email,
+                    password=admin_password
+                )
+                admin_user.is_admin = True
+                admin_user.email_verified = True
+                db.session.add(admin_user)
+                db.session.commit()
+                app.logger.info(f'Created admin user: {admin_email}')
     
     # Логирование запуска приложения
     app.logger.info('Collections application startup complete')

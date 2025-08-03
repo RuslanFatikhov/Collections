@@ -1,5 +1,4 @@
-from app import db
-import os
+from app import dbimport os
 import logging
 from flask import Blueprint, request, jsonify, send_from_directory, current_app
 from flask_login import login_required, current_user
@@ -14,36 +13,22 @@ from app.utils.helpers import (
     get_file_hash,
     is_safe_path,
     format_file_size,
-    resize_image)
+    FileUploadError
+)
 from app.controllers.collection_controller import CollectionController
 from app.utils.rate_limiter import (
-    rate_limit,
-    auth_rate_limit,
-    api_read_rate_limit,
-    api_write_rate_limit,
-    api_delete_rate_limit,
+    api_read_rate_limit, 
+    api_write_rate_limit, 
+    api_delete_rate_limit, 
     file_upload_rate_limit,
-    public_view_rate_limit,
-    get_rate_limit_stats
+    public_view_rate_limit
 )
-api_bp = Blueprint('api', __name__)
+from app.utils.security import SecurityValidator, SecurityHeaders, check_file_safety
+from app.utils.logger import AuditLogger
+from app.models.audit_log import AuditAction, ResourceType
 
-@api_bp.route('/health', methods=['GET'])
-def health_check():
-    """Проверка состояния API"""
-    return jsonify({
-        'status': 'healthy',
-        'version': '1.0',
-        'timestamp': 'now'
-    }), 200
-
-@api_bp.route('/stats', methods=['GET'])
-def get_stats():
-    """Получение статистики API"""
-    return jsonify({
-        "status": "working",
-        "message": "API статистика доступна"
-    }), 200# Создаем Blueprint для API
+# Создаем Blueprint для API
+api_bp = Blueprint('api', __name__, url_prefix='/api')
 
 # Логгер для загрузок
 upload_logger = logging.getLogger('uploads')
@@ -64,7 +49,7 @@ def before_api_request():
 @api_bp.after_request
 def after_api_request(response):
     """Применение security headers к API ответам"""
-    # response = SecurityHeaders.apply_security_headers(response)
+    response = SecurityHeaders.apply_security_headers(response)
     
     # Добавляем API-специфичные заголовки
     response.headers['X-API-Version'] = '1.0'
@@ -579,6 +564,13 @@ def delete_item(item_id):
 # ========== СЛУЖЕБНЫЕ API ==========
 
 @api_bp.route('/health', methods=['GET'])
+def health_check():
+    """Проверка состояния API"""
+    return jsonify({
+        'status': 'healthy',
+        'version': '1.0',
+        'timestamp': db.func.now()
+    }), 200
 
 
 @api_bp.route('/stats', methods=['GET'])

@@ -21,17 +21,27 @@ class Config:
     MAX_CONTENT_LENGTH = 10 * 1024 * 1024  # 10MB
     ALLOWED_EXTENSIONS = {'png', 'jpg', 'jpeg', 'gif', 'webp'}
     
-    # Настройки OAuth
-    GOOGLE_CLIENT_ID = os.environ.get('GOOGLE_CLIENT_ID')
-    GOOGLE_CLIENT_SECRET = os.environ.get('GOOGLE_CLIENT_SECRET')
-    APPLE_CLIENT_ID = os.environ.get('APPLE_CLIENT_ID')
-    APPLE_CLIENT_SECRET = os.environ.get('APPLE_CLIENT_SECRET')
-    APPLE_KEY_ID = os.environ.get('APPLE_KEY_ID')
-    APPLE_TEAM_ID = os.environ.get('APPLE_TEAM_ID')
-    APPLE_PRIVATE_KEY = os.environ.get('APPLE_PRIVATE_KEY')  # Путь к файлу или содержимое ключа
+    # Настройки Email
+    MAIL_SERVER = os.environ.get('MAIL_SERVER') or 'smtp.gmail.com'
+    MAIL_PORT = int(os.environ.get('MAIL_PORT') or 587)
+    MAIL_USE_TLS = os.environ.get('MAIL_USE_TLS', 'true').lower() in ['true', 'on', '1']
+    MAIL_USE_SSL = os.environ.get('MAIL_USE_SSL', 'false').lower() in ['true', 'on', '1']
+    MAIL_USERNAME = os.environ.get('MAIL_USERNAME')
+    MAIL_PASSWORD = os.environ.get('MAIL_PASSWORD')
+    MAIL_DEFAULT_SENDER = os.environ.get('MAIL_DEFAULT_SENDER') or os.environ.get('MAIL_USERNAME')
+    MAIL_MAX_EMAILS = os.environ.get('MAIL_MAX_EMAILS') or 100
+    MAIL_SUPPRESS_SEND = os.environ.get('MAIL_SUPPRESS_SEND', 'false').lower() in ['true', 'on', '1']
     
     # URL настройки
     BASE_URL = os.environ.get('BASE_URL') or 'http://localhost:5000'
+    
+    # Настройки безопасности
+    WTF_CSRF_ENABLED = True
+    WTF_CSRF_TIME_LIMIT = 3600  # 1 час
+    
+    # Настройки rate limiting
+    RATELIMIT_STORAGE_URL = os.environ.get('REDIS_URL') or 'memory://'
+    RATELIMIT_DEFAULT = "100 per hour"
     
     # Настройки логирования
     LOG_LEVEL = os.environ.get('LOG_LEVEL') or 'INFO'
@@ -51,6 +61,12 @@ class Config:
             subdir_path = os.path.join(upload_folder, subdir)
             if not os.path.exists(subdir_path):
                 os.makedirs(subdir_path)
+            
+            # Создание поддиректорий для разных размеров
+            for size in ['original', 'medium', 'thumbnail']:
+                size_path = os.path.join(subdir_path, size)
+                if not os.path.exists(size_path):
+                    os.makedirs(size_path)
         
         # Настройка логирования
         import logging
@@ -87,6 +103,9 @@ class DevelopmentConfig(Config):
     SESSION_COOKIE_SECURE = False
     WTF_CSRF_ENABLED = False  # Отключаем CSRF для API в разработке
     
+    # Отключаем отправку email в разработке
+    MAIL_SUPPRESS_SEND = True
+    
     @staticmethod
     def init_app(app):
         Config.init_app(app)
@@ -97,6 +116,10 @@ class DevelopmentConfig(Config):
         
         # Вывод всех SQL запросов в консоль
         logging.getLogger('sqlalchemy.engine').setLevel(logging.INFO)
+        
+        # Логируем email в консоль вместо отправки
+        if app.config['MAIL_SUPPRESS_SEND']:
+            print("=== EMAIL SUPPRESSED IN DEVELOPMENT ===")
 
 
 class TestingConfig(Config):
@@ -110,11 +133,17 @@ class TestingConfig(Config):
     # Отключаем CSRF для тестов
     WTF_CSRF_ENABLED = False
     
+    # Отключаем отправку email в тестах
+    MAIL_SUPPRESS_SEND = True
+    
     # Отключаем логирование в файл для тестов
     LOG_FILE = None
     
     # Временная папка для загрузок в тестах
     UPLOAD_FOLDER = '/tmp/collections_test_uploads'
+    
+    # Быстрые rate limits для тестов
+    RATELIMIT_DEFAULT = "1000 per hour"
 
 
 class ProductionConfig(Config):
@@ -127,6 +156,9 @@ class ProductionConfig(Config):
     SESSION_COOKIE_HTTPONLY = True
     SESSION_COOKIE_SAMESITE = 'Strict'
     
+    # Включаем CSRF защиту
+    WTF_CSRF_ENABLED = True
+    
     # Настройки для PostgreSQL в продакшне
     SQLALCHEMY_DATABASE_URI = os.environ.get('DATABASE_URL') or \
         'postgresql://user:password@localhost/collections'
@@ -137,6 +169,12 @@ class ProductionConfig(Config):
     S3_ACCESS_KEY = os.environ.get('S3_ACCESS_KEY')
     S3_SECRET_KEY = os.environ.get('S3_SECRET_KEY')
     S3_ENDPOINT = os.environ.get('S3_ENDPOINT')  # Для Timeweb Object Storage
+    
+    # Включаем отправку email в продакшне
+    MAIL_SUPPRESS_SEND = False
+    
+    # Строгие rate limits для продакшна
+    RATELIMIT_DEFAULT = "60 per hour"
     
     @staticmethod
     def init_app(app):
@@ -150,6 +188,14 @@ class ProductionConfig(Config):
         syslog_handler = SysLogHandler()
         syslog_handler.setLevel(logging.WARNING)
         app.logger.addHandler(syslog_handler)
+        
+        # Проверяем обязательные настройки для продакшна
+        required_settings = ['SECRET_KEY', 'MAIL_SERVER', 'MAIL_USERNAME', 'MAIL_PASSWORD']
+        missing_settings = [setting for setting in required_settings 
+                          if not app.config.get(setting)]
+        
+        if missing_settings:
+            raise ValueError(f"Missing required production settings: {', '.join(missing_settings)}")
 
 
 # Словарь конфигураций
