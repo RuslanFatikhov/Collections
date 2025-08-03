@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+
+{% block title %}Collections - Управляй своими коллекциями{% endblock %}
+
+{% block content %}
+<div style="text-align: center; padding: 2rem;">
+    <h1>Добро пожаловать в Collections!</h1>
+    <p>Создавайте и управляйте своими коллекциями с кастомными параметрами</p>
+    
+    <div style="margin: 2rem 0;">
+        <a href="/auth/login" class="btn">Войти через Google</a>
+        <a href="/collections/" class="btn" style="margin-left: 1rem;">Просмотр коллекций</a>
+    </div>
+</div>
+
+{% if recent_collections %}
+<div>
+    <h2>Последние публичные коллекции</h2>
+    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 1rem;">
+        {% for collection in recent_collections %}
+        <div style="border: 1px solid #ddd; padding: 1rem; border-radius: 5px;">
+            <h3>{{ collection.name }}</h3>
+            <p>{{ collection.description or 'Без описания' }}</p>
+            <p><small>Создано: {{ collection.created_at.strftime('%d.%m.%Y') }}</small></p>
+            <a href="/collection/{{ collection.public_uuid }}" class="btn">Посмотреть</a>
+        </div>
+        {% endfor %}
+    </div>
+</div>
+{% endif %}
+{% endblock %}

@@ -1,0 +1,101 @@
+{% extends "base.html" %}
+{% block title %}Регистрация - Collections{% endblock %}
+
+{% block content %}
+<div class="auth-container">
+    <div class="auth-card">
+        <h2>Регистрация</h2>
+        
+        <!-- Форма регистрации -->
+        <form method="POST" class="auth-form" id="registerForm">
+            {{ form.hidden_tag() }}
+            
+            <div class="form-group">
+                {{ form.name.label(class="form-label") }}
+                {{ form.name(class="form-control", placeholder="Введите ваше имя") }}
+                {% if form.name.errors %}
+                    <div class="form-errors">
+                        {% for error in form.name.errors %}
+                            <span class="error">{{ error }}</span>
+                        {% endfor %}
+                    </div>
+                {% endif %}
+            </div>
+            
+            <div class="form-group">
+                {{ form.email.label(class="form-label") }}
+                {{ form.email(class="form-control", placeholder="Введите ваш email") }}
+                {% if form.email.errors %}
+                    <div class="form-errors">
+                        {% for error in form.email.errors %}
+                            <span class="error">{{ error }}</span>
+                        {% endfor %}
+                    </div>
+                {% endif %}
+            </div>
+            
+            <div class="form-group">
+                {{ form.password.label(class="form-label") }}
+                {{ form.password(class="form-control", placeholder="Введите пароль") }}
+                <div class="password-requirements">
+                    <small>Пароль должен содержать минимум 6 символов, включая цифры и буквы</small>
+                </div>
+                {% if form.password.errors %}
+                    <div class="form-errors">
+                        {% for error in form.password.errors %}
+                            <span class="error">{{ error }}</span>
+                        {% endfor %}
+                    </div>
+                {% endif %}
+            </div>
+            
+            <div class="form-group">
+                {{ form.password_confirm.label(class="form-label") }}
+                {{ form.password_confirm(class="form-control", placeholder="Повторите пароль") }}
+                {% if form.password_confirm.errors %}
+                    <div class="form-errors">
+                        {% for error in form.password_confirm.errors %}
+                            <span class="error">{{ error }}</span>
+                        {% endfor %}
+                    </div>
+                {% endif %}
+            </div>
+            
+            <div class="form-group">
+                {{ form.submit(class="btn btn-primary btn-block") }}
+            </div>
+        </form>
+        
+        <!-- Ссылки -->
+        <div class="auth-links">
+            <p>Уже есть аккаунт? <a href="{{ url_for('auth.login') }}">Войти</a></p>
+        </div>
+    </div>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const form = document.getElementById('registerForm');
+    const passwordField = document.getElementById('password');
+    const confirmField = document.getElementById('password_confirm');
+    
+    // Проверка совпадения паролей в реальном времени
+    function checkPasswordsMatch() {
+        if (confirmField.value && passwordField.value !== confirmField.value) {
+            confirmField.setCustomValidity('Пароли не совпадают');
+        } else {
+            confirmField.setCustomValidity('');
+        }
+    }
+    
+    passwordField?.addEventListener('input', checkPasswordsMatch);
+    confirmField?.addEventListener('input', checkPasswordsMatch);
+    
+    form.addEventListener('submit', function(e) {
+        const submitBtn = form.querySelector('input[type="submit"]');
+        submitBtn.value = 'Регистрация...';
+        submitBtn.disabled = true;
+    });
+});
+</script>
+{% endblock %}
