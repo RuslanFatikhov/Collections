@@ -1,7 +1,6 @@
 from flask_wtf import FlaskForm
 from wtforms import StringField, PasswordField, BooleanField, SubmitField
 from wtforms.validators import DataRequired, Email, Length, EqualTo, ValidationError
-from app.models.user import User
 import re
 
 class LoginForm(FlaskForm):
@@ -39,6 +38,7 @@ class RegisterForm(FlaskForm):
 
     def validate_email(self, email):
         """Проверка уникальности email"""
+        from app.models.user import User
         user = User.find_by_email(email.data.lower())
         if user:
             raise ValidationError('Пользователь с таким email уже существует')
@@ -47,11 +47,9 @@ class RegisterForm(FlaskForm):
         """Проверка сложности пароля"""
         password_value = password.data
         
-        # Проверяем наличие хотя бы одной цифры
         if not re.search(r'\d', password_value):
             raise ValidationError('Пароль должен содержать хотя бы одну цифру')
         
-        # Проверяем наличие хотя бы одной буквы
         if not re.search(r'[a-zA-Zа-яА-Я]', password_value):
             raise ValidationError('Пароль должен содержать хотя бы одну букву')
 
@@ -62,12 +60,6 @@ class ForgotPasswordForm(FlaskForm):
         Email(message='Введите корректный email')
     ])
     submit = SubmitField('Восстановить пароль')
-
-    def validate_email(self, email):
-        """Проверка существования пользователя"""
-        user = User.find_by_email(email.data.lower())
-        if not user:
-            raise ValidationError('Пользователь с таким email не найден')
 
 class ResetPasswordForm(FlaskForm):
     """Форма сброса пароля"""
@@ -80,18 +72,6 @@ class ResetPasswordForm(FlaskForm):
         EqualTo('password', message='Пароли не совпадают')
     ])
     submit = SubmitField('Изменить пароль')
-
-    def validate_password(self, password):
-        """Проверка сложности пароля"""
-        password_value = password.data
-        
-        # Проверяем наличие хотя бы одной цифры
-        if not re.search(r'\d', password_value):
-            raise ValidationError('Пароль должен содержать хотя бы одну цифру')
-        
-        # Проверяем наличие хотя бы одной буквы
-        if not re.search(r'[a-zA-Zа-яА-Я]', password_value):
-            raise ValidationError('Пароль должен содержать хотя бы одну букву')
 
 class ChangePasswordForm(FlaskForm):
     """Форма изменения пароля в профиле"""
@@ -117,18 +97,6 @@ class ChangePasswordForm(FlaskForm):
         if not self.user.check_password(current_password.data):
             raise ValidationError('Неверный текущий пароль')
 
-    def validate_new_password(self, new_password):
-        """Проверка сложности нового пароля"""
-        password_value = new_password.data
-        
-        # Проверяем наличие хотя бы одной цифры
-        if not re.search(r'\d', password_value):
-            raise ValidationError('Пароль должен содержать хотя бы одну цифру')
-        
-        # Проверяем наличие хотя бы одной буквы
-        if not re.search(r'[a-zA-Zа-яА-Я]', password_value):
-            raise ValidationError('Пароль должен содержать хотя бы одну букву')
-
 class ProfileForm(FlaskForm):
     """Форма редактирования профиля"""
     name = StringField('Имя', validators=[
@@ -149,6 +117,7 @@ class ProfileForm(FlaskForm):
     def validate_email(self, email):
         """Проверка уникальности email (если изменился)"""
         if email.data.lower() != self.user.email.lower():
+            from app.models.user import User
             user = User.find_by_email(email.data.lower())
             if user:
                 raise ValidationError('Пользователь с таким email уже существует')

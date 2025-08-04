@@ -2,15 +2,22 @@ import os
 from flask import Flask, jsonify, request
 from flask_sqlalchemy import SQLAlchemy
 from flask_login import LoginManager
-from flask_wtf.csrf import CSRFProtect
 from flask_mail import Mail
 from app.config.config import config
 
 # Инициализация расширений
 db = SQLAlchemy()
 login_manager = LoginManager()
-csrf = CSRFProtect()
 mail = Mail()
+
+# Попытка импорта CSRF, если не получается - работаем без него
+try:
+    from flask_wtf.csrf import CSRFProtect
+    csrf = CSRFProtect()
+    CSRF_AVAILABLE = True
+except ImportError:
+    csrf = None
+    CSRF_AVAILABLE = False
 
 def create_app(config_name=None):
     """Фабрика приложений Flask"""
@@ -39,12 +46,15 @@ def create_app(config_name=None):
     login_manager.login_message_category = 'info'
     
     # Настройка CSRF (отключаем для API endpoints)
-    csrf.init_app(app)
-    
-    # Отключаем CSRF для API маршрутов
-    @csrf.exempt
-    def exempt_api_routes():
-        return request.path.startswith('/api/')
+    if CSRF_AVAILABLE:
+        csrf.init_app(app)
+        
+        # Отключаем CSRF для API маршрутов
+        @csrf.exempt
+        def exempt_api_routes():
+            return request.path.startswith('/api/')
+    else:
+        app.logger.warning("CSRF protection disabled due to compatibility issues")
     
     @login_manager.user_loader
     def load_user(user_id):
